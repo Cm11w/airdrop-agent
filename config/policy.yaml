@@ -8,6 +8,21 @@ allow_mainnet: false                # flip true to let mainnet tx run (tiny caps
 allow_deploy_mainnet: false
 auto_allowlist_domains: true        # scam_check == ok → domain may be auto-added in turbo
 
+# Browser hardening (safe-fix R7). Safe mode FORCES ignore_https_errors=false
+# and no clipboard permissions, whatever is set here. Other modes read these
+# values: ignore_https_errors defaults to false (a bad cert / MITM must fail
+# loudly instead of being silently accepted, as it was before this fix);
+# clipboard defaults to true (the pre-fix behaviour — pages could read/write
+# the clipboard; set false to turn it off outside safe mode).
+browser:
+  ignore_https_errors: false
+  clipboard: true
+
+# R13: Discord self-bot (user-token automation) is opt-in only, default off.
+# It stays disabled in safe mode regardless of this setting.
+social:
+  discord_selfbot: false
+
 chains:
   sepolia:
     chain_id: 11155111
@@ -115,6 +130,12 @@ contracts_allowlist:
   arbitrum: []
 
 blocklist: []                      # known drainers / wrong addresses
+domain_blocklist: []               # KNOWN-BAD DOMAINS, operator-maintained (subdomains included).
+                                   # Enforced by the browser as a HARD BLOCK in every mode
+                                   # (navigation refused, even with check_scam=False) and by
+                                   # scam_check.check_url (verdict bad). Deliberately empty by
+                                   # default: fill it yourself from sources you trust — do NOT
+                                   # rely on a hardcoded list shipped in code (it goes stale).
 domain_allowlist:                  # SIWE + wallet connect allowed without a gate
   - galxe.com
   - zealy.io

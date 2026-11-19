@@ -84,8 +84,15 @@ def send(chain: str, identity_id: str, label: str, to: str | None, *, value_wei:
     acct = vault.load_evm(label)
     owner = acct.address
     dec = decode(calldata)
-    if dec["kind"] in ("approve", "increaseAllowance", "permit2Approve") and policy.unlimited_approval(dec.get("amount")):
-        log.info("unlimited approval detected (allowed, flagged)")
+    # R1: an unlimited approval ALWAYS gates, in every mode, even when the
+    # token contract is allowlisted. (Previously this was only logged.)
+    # setApprovalForAll(true) is the NFT equivalent of an unlimited approval
+    # (integration addition: same one-line rule).
+    unlimited = ((dec["kind"] in ("approve", "increaseAllowance", "permit2Approve")
+                  and policy.unlimited_approval(dec.get("amount")))
+                 or (dec["kind"] == "setApprovalForAll" and dec.get("approved") is True))
+    if unlimited:
+        log.warning("unlimited approval detected — gate required in every mode")
     summary = _human(dec, value_wei, chain)
     contract_ok = policy.allowlisted_contract(chain, to or "") or dec["kind"] == "native" or contract_creation
 
@@ -109,6 +116,11 @@ def send(chain: str, identity_id: str, label: str, to: str | None, *, value_wei:
     payload = {"_kind": "tx", "chain": chain, "identity": identity_id, "label": label, "to": to,
                "value": str(value_wei), "data": calldata, "task": task}
     want_gate, reasons = policy.needs_gate("tx", mainnet=not cfg["testnet"], contract_ok=contract_ok)
+    if unlimited:
+        # Hard rule, not a mode decision: no mode may auto-approve an unlimited
+        # allowance, allowlisted contract or not.
+        want_gate = True
+        reasons = [*reasons, "unlimited approval (always gates)"]
     if want_gate:
         body = (f"TX {summary}\nfrom {label} {owner}\nto {to}\ngas~{gas} fee~{gas*max_fee/1e18:.8f}\n"
                 f"alasan: {'; '.join(reasons)}")
@@ -150,10 +162,21 @@ def send(chain: str, identity_id: str, label: str, to: str | None, *, value_wei:
 
 
 def approve(chain: str, identity_id: str, label: str, token: str, spender: str,
-            amount: int | None = None, broadcast: bool = False) -> dict:
-    """ERC20 approve builder. amount None = max uint256 (denied? no: allowed but flagged)."""
-    if amount is None:
-        amount = 2 ** 256 - 1
+            amount: int | None = None, broadcast: bool = False, *, unlimited: bool = False) -> dict:
+    """ERC20 approve builder.
+
+    R1: `amount` must be explicit. The old default (`amount=None` silently
+    becoming 2**256-1) was a trap: a bare `aa wallet approve` without
+    --amount issued an unlimited approval. Unlimited now requires the
+    explicit `unlimited=True` flag (CLI: --unlimited, with a warning) and is
+    still always gated by send().
+    """
+    if amount is None and not unlimited:
+        raise Denied("approve() needs an explicit amount — pass amount=... or "
+                     "unlimited=True (CLI: --amount N or --unlimited)")
+    if unlimited:
+        amount = policy.MAX_WEI
+        log.warning("unlimited approve requested for spender %s (always gated)", spender)
     from eth_abi import encode as abi_encode
 
     data = "0x095ea7b3" + abi_encode(["address", "uint256"], [to_checksum_address(spender), amount]).hex()

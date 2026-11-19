@@ -54,6 +54,15 @@ def _over_daily(kind: str, key: str) -> bool:
     return _count_today(kind) >= limit
 
 
+def _safe_allowed(key: str) -> bool:
+    """R12: in safe mode the autopilot follow/quests modules only run when
+    autopilot.yaml explicitly opts in (safe_allow_follow / safe_allow_quests).
+    Outside safe mode behaviour is unchanged."""
+    if policy.mode() != "safe":
+        return True
+    return cfg().get(key) is True
+
+
 def identity_pool() -> list[dict]:
     out = []
     for i in db.identities():
@@ -107,7 +116,8 @@ async def tick(*, headless: bool = True) -> dict:
             errors.append(f"radar: {e}")
 
     # 2. social follows from config
-    if mods().get("follow", True) and _due("follow", float((cfg().get("intervals") or {}).get("follow_min", 180))):
+    if (mods().get("follow", True) and _safe_allowed("safe_allow_follow")
+            and _due("follow", float((cfg().get("intervals") or {}).get("follow_min", 180)))):
         try:
             ident = pick_identity()
             tg_targets = [t for t in (config.load_yaml("radar_sources.yaml").get("tg_channels") or [])
@@ -147,7 +157,8 @@ async def tick(*, headless: bool = True) -> dict:
             errors.append(f"daily: {e}")
 
     # 4. due quests
-    if mods().get("quests", True) and _due("quests", float((cfg().get("intervals") or {}).get("quests_min", 8))):
+    if (mods().get("quests", True) and _safe_allowed("safe_allow_quests")
+            and _due("quests", float((cfg().get("intervals") or {}).get("quests_min", 8)))):
         if not _over_daily("quest", "quests"):
             n = int(cfg().get("max_quests_per_run", 3))
             for q in dsl.next_due(n):

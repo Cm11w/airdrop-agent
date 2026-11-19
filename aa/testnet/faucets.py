@@ -57,7 +57,9 @@ async def claim(b, identity_id: str, chain: str, name: str = "") -> dict:
         b.page.set_default_timeout(15000)
     except Exception:  # noqa: BLE001
         pass
-    await b.goto(f["url"], check_scam=False)
+    # R11: safe mode never disables the scam check — a catalogued faucet URL can
+    # still be hijacked or phished, so check_scam is forced on in safe mode.
+    await b.goto(f["url"], check_scam=(policy.mode() == "safe"))
     await flows.dismiss(b)
     cap = await b.solve_captcha_if_present()
     filled = False

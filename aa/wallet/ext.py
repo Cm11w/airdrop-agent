@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import struct
 import zipfile
@@ -18,7 +19,7 @@ from pathlib import Path
 
 import requests
 
-from .. import config
+from .. import config, vault
 from ..jsonio import Denied
 from ..log import get_logger
 
@@ -100,9 +101,41 @@ def remove(identity_id: str, name: str) -> dict:
     return {"removed": not d.exists(), "path": str(d)}
 
 
+def _seed_aad(identity_id: str) -> bytes:
+    """AAD for the encrypted seed blob (same kind/name scheme as aa/vault.py)."""
+    return f"ext/{identity_id}/rabby.seed".encode()
+
+
+def _encrypt_seed(identity_id: str, mnemonic: str, password: str) -> dict:
+    """Seal the seed as a vault-style AES-256-GCM + scrypt blob (never plaintext)."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    salt, nonce = os.urandom(16), os.urandom(12)
+    data = json.dumps({"mnemonic": mnemonic, "password": password}).encode()
+    ct = AESGCM(vault._kdf(salt)).encrypt(nonce, data, _seed_aad(identity_id))
+    return {"v": 1, "salt": salt.hex(), "nonce": nonce.hex(), "ct": ct.hex()}
+
+
 def seed_rabby(identity_id: str, mnemonic: str, password: str) -> Path:
-    """Write a Rabby-compatible seed file for manual onboarding (agent automates the UI)."""
+    """Write a Rabby-compatible seed file for manual onboarding (agent automates the UI).
+
+    R8: the file is ENCRYPTED with the vault scheme (AES-256-GCM + scrypt, vault
+    password) — the mnemonic/password never touch disk in plaintext. Read it back
+    with load_rabby_seed().
+    """
     p = config.EXT_DIR / identity_id / "rabby.seed"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"mnemonic": mnemonic, "password": password}))
+    config.secure_overwrite(p, json.dumps(_encrypt_seed(identity_id, mnemonic, password)))
     return p
+
+
+def load_rabby_seed(identity_id: str) -> dict:
+    """Decrypt a seed file written by seed_rabby(). Returns {"mnemonic", "password"}."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    p = config.EXT_DIR / identity_id / "rabby.seed"
+    if not p.exists():
+        raise Denied(f"no Rabby seed file for identity {identity_id}")
+    b = json.loads(p.read_text())
+    raw = AESGCM(vault._kdf(bytes.fromhex(b["salt"]))).decrypt(
+        bytes.fromhex(b["nonce"]), bytes.fromhex(b["ct"]), _seed_aad(identity_id))
+    return json.loads(raw.decode())

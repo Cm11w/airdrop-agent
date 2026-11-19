@@ -19,6 +19,11 @@ Shape (YAML file in ~/.airdrop-agent/quests or inline in the DB):
     - screenshot: claimed
 
 Step vocabulary is validated here so a typo fails before a browser opens.
+
+Security note (R11): steps `eval` (arbitrary JS in the page) and `api` (arbitrary
+HTTP) need an explicit per-quest opt-in — top-level `allow_eval: true` /
+`allow_api: true` — and are rejected outright in safe mode, even with opt-in.
+Importing a foreign quest YAML must never silently grant arbitrary execution.
 """
 from __future__ import annotations
 
@@ -76,6 +81,23 @@ def validate(q: dict) -> list[str]:
             errs.append(f"step {i}: unknown action '{key}' (known: {', '.join(sorted(STEP_KEYS))})")
         elif not isinstance(val, STEP_KEYS[key]):
             errs.append(f"step {i}: '{key}' expects {STEP_KEYS[key]}")
+    # R11: 'eval' (arbitrary JS in the page, with the wallet provider injected)
+    # and 'api' (arbitrary HTTP to any URL) are arbitrary execution — they need an
+    # explicit per-quest opt-in, and are never allowed in safe mode.
+    uses_eval = any(isinstance(st, dict) and next(iter(st), None) == "eval"
+                    for st in (steps if isinstance(steps, list) else []))
+    uses_api = any(isinstance(st, dict) and next(iter(st), None) == "api"
+                   for st in (steps if isinstance(steps, list) else []))
+    if uses_eval or uses_api:
+        from .. import policy
+
+        if policy.mode() == "safe":
+            errs.append("safe mode: 'eval'/'api' steps are never allowed (arbitrary code/HTTP execution)")
+        else:
+            if uses_eval and q.get("allow_eval") is not True:
+                errs.append("step 'eval' runs arbitrary JS in the page: set top-level allow_eval: true to opt in")
+            if uses_api and q.get("allow_api") is not True:
+                errs.append("step 'api' performs arbitrary HTTP requests: set top-level allow_api: true to opt in")
     return errs
 
 

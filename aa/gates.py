@@ -30,16 +30,23 @@ def pending_for(payload: dict) -> dict | None:
                   (_hash(payload),))
 
 
+def _hash_code(code: str, salt: str) -> str:
+    """Salted SHA-256 of a gate code. Only the hash is ever stored/compared —
+    the plaintext code is never written to the DB (R4)."""
+    return hashlib.sha256(f"{salt}:{code}".encode()).hexdigest()
+
+
 def create(kind: str, summary: str, payload: dict) -> int:
     existing = pending_for(payload)
     if existing:
         return int(existing["id"])
     code = "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(6))
+    salt = secrets.token_hex(16)
     gid = db.execute(
-        "INSERT INTO gates(kind,summary,payload,payload_hash,code_hash,code,created_at)"
-        " VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO gates(kind,summary,payload,payload_hash,code_hash,code_salt,code,created_at)"
+        " VALUES(?,?,?,?,?,?,NULL,?)",
         (kind, summary, json.dumps(payload, default=str), _hash(payload),
-         hashlib.sha256(code.encode()).hexdigest(), code, db.now()))
+         _hash_code(code, salt), salt, db.now()))
     db.event("gate", f"#{gid} {kind}: {summary[:160]}", payload.get("identity_id"), level="warn")
     notify.send(notify.gate_message(gid, kind, summary, code), silent=False)
     return gid
@@ -64,16 +71,37 @@ def _check_code(gid: int, code: str) -> dict:
         raise Denied(f"gate #{gid} not found")
     if r["status"] != "pending":
         raise Denied(f"gate #{gid} already {r['status']}")
+    if not code:
+        # A missing/empty code is a wrong code, not a crash (integration fix:
+        # callers that used to read the plaintext code from the DB now get NULL).
+        raise Denied(f"wrong code for gate #{gid}")
     given = code.strip().upper()
-    expect = r.get("code") or ""
-    ok = hmac.compare_digest(given, expect) if expect else hmac.compare_digest(
-        hashlib.sha256(given.encode()).hexdigest(), r["code_hash"])
+    salt = r.get("code_salt")
+    if salt:
+        ok = hmac.compare_digest(_hash_code(given, salt), r.get("code_hash") or "")
+    elif r.get("code_hash"):
+        # Legacy gates created before salted hashing: unsalted SHA-256 only.
+        # Their plaintext `code` column is NULLed by the db migration, so this
+        # still never compares plaintext.
+        ok = hmac.compare_digest(hashlib.sha256(given.encode()).hexdigest(), r["code_hash"])
+    else:
+        ok = False
     if not ok:
         raise Denied(f"wrong code for gate #{gid}")
     return r
 
 
-def approve(gid: int, code: str) -> dict:
+def approve(gid: int, code: str, *, persist_domain: bool = False) -> dict:
+    """Approve a pending gate. The approval itself is one-time (consume/require
+    mark it used); whether the gate's domain ALSO joins the permanent domain
+    allowlist depends on the active mode (see policy.persist_domain_allowed):
+
+    safe      never persisted — the approval covers this one action only.
+    balanced  persisted only when the gate payload opts in (persist_domain: true)
+              or the operator passes persist_domain=True here
+              (`aa gate approve --persist-domain`).
+    turbo     persisted (auto-allowlist is a turbo feature) and logged.
+    """
     r = _check_code(gid, code)
     db.execute("UPDATE gates SET status='approved', decided_at=? WHERE id=?", (db.now(), gid))
     db.event("gate", f"#{gid} approved", level="info")
@@ -81,11 +109,21 @@ def approve(gid: int, code: str) -> dict:
         payload = json.loads(r["payload"] or "{}")
     except ValueError:
         payload = {}
+    persisted = False
     if payload.get("domain"):
-        policy.allow_domain(payload["domain"])
+        if policy.persist_domain_allowed({**payload, "persist_domain":
+                                          bool(payload.get("persist_domain") or persist_domain)}):
+            policy.allow_domain(payload["domain"])
+            persisted = True
+            log.info("gate #%s approved: domain %s added to the permanent allowlist "
+                     "(mode=%s)", gid, payload["domain"], policy.mode())
+        else:
+            log.info("gate #%s approved (one-time only): domain %s NOT added to the "
+                     "allowlist (mode=%s, no persist_domain opt-in)",
+                     gid, payload["domain"], policy.mode())
     if payload.get("quest_yaml"):
         db.execute("UPDATE quests SET status='pending', updated_at=? WHERE id=?", (db.now(), payload["quest_id"]))
-    return {"gate": gid, "status": "approved", "kind": r["kind"]}
+    return {"gate": gid, "status": "approved", "kind": r["kind"], "domain_persisted": persisted}
 
 
 def reject(gid: int, reason: str = "") -> dict:

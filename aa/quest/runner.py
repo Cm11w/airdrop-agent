@@ -82,6 +82,16 @@ async def _do_social(step: str, val: str, identity_id: str) -> dict:
     return {"skipped": kind}
 
 
+def _check_arbitrary_step(q: dict, step: str) -> None:
+    """Runtime backstop for R11 (validate() is the first check): 'eval'/'api'
+    execute arbitrary code/HTTP, so they need an explicit per-quest opt-in and
+    are never allowed in safe mode."""
+    if policy.mode() == "safe":
+        raise Denied(f"safe mode: '{step}' steps are not allowed (arbitrary execution)")
+    if q.get(f"allow_{step}") is not True:
+        raise Denied(f"'{step}' step needs top-level allow_{step}: true in the quest")
+
+
 async def _do_step(b: Browser, step: str, val, identity_id: str, q: dict, proof: list[dict]) -> dict:
     ad = adapters.get(q.get("platform", "generic"))
     if step == "goto":
@@ -152,6 +162,7 @@ async def _do_step(b: Browser, step: str, val, identity_id: str, q: dict, proof:
         proof.append({"screenshot": p})
         return {"screenshot": p}
     if step == "eval":
+        _check_arbitrary_step(q, "eval")
         return {"eval": str(await b.page.evaluate(val))[:300]}
     if step == "back":
         await b.back()
@@ -182,6 +193,7 @@ async def _do_step(b: Browser, step: str, val, identity_id: str, q: dict, proof:
         return await asyncio.to_thread(signer.personal, identity_id, val.get("label", ""), val.get("message", ""),
                                        val.get("origin", b.page.url))
     if step == "api":
+        _check_arbitrary_step(q, "api")
         import requests
 
         method = val.get("method", "GET").upper()

@@ -114,6 +114,29 @@ class Browser:
     async def __aexit__(self, *exc):
         await self.close()
 
+    def context_options(self) -> dict:
+        """Security-relevant browser-context options for the active mode/policy.
+
+        safe mode forces ignore_https_errors=False and NO clipboard permissions,
+        whatever policy.yaml says. Other modes read the `browser:` block in
+        policy.yaml: ignore_https_errors (default False) and clipboard
+        (default True — the pre-fix behaviour, kept so balanced/turbo do not
+        silently lose clipboard access; set `browser.clipboard: false` to turn
+        it off). See docs/SAFETY.md, "Browser hardening".
+        """
+        from .. import policy
+
+        bcfg = policy.browser_cfg()
+        if policy.mode() == "safe":
+            opts = {"ignore_https_errors": False, "permissions": []}
+        else:
+            opts = {"ignore_https_errors": bool(bcfg.get("ignore_https_errors", False)),
+                    "permissions": (["clipboard-read", "clipboard-write"]
+                                    if bcfg.get("clipboard", True) else [])}
+        log.info("browser context (mode=%s): ignore_https_errors=%s permissions=%s",
+                 policy.mode(), opts["ignore_https_errors"], opts["permissions"])
+        return opts
+
     async def start(self) -> "Browser":
         from .. import guard
 
@@ -139,8 +162,7 @@ class Browser:
               "viewport": {"width": 1366 + random.randint(-40, 60), "height": 768 + random.randint(-30, 40)},
               "locale": config.env("BROWSER_LOCALE", "en-US"),
               "timezone_id": config.env("TZ", "Asia/Jakarta"),
-              "user_agent": self.user_agent, "ignore_https_errors": True,
-              "permissions": ["clipboard-read", "clipboard-write"]}
+              "user_agent": self.user_agent, **self.context_options()}
         if proxy:
             kw["proxy"] = {"server": proxy} if "@" not in proxy else _proxy_obj(proxy)
         self._ctx = await self._pw.chromium.launch_persistent_context(str(self._profile_dir()),
@@ -210,14 +232,38 @@ class Browser:
         return config.env("BROWSER_UA", UA)
 
     async def goto(self, url: str, *, check_scam: bool = True, wait_until: str = "domcontentloaded") -> dict:
-        from .. import scam_check
+        from .. import gates, policy, scam_check
 
         if not url.startswith("http"):
             url = "https://" + url
         host = urlparse(url).hostname or ""
+        # Hard block, every mode, even with check_scam=False: the operator's
+        # domain_blocklist in policy.yaml is never advisory.
+        if policy.domain_blocklisted(host):
+            db.event("page", f"goto {host} refused: domain blocklisted", self.identity_id, level="error")
+            raise Denied(f"refusing navigation to blocklisted domain {host} "
+                         "(policy.yaml domain_blocklist)")
         verdict = scam_check.check_url(url)
+        text_verdict: dict = {"verdict": "ok", "reasons": [], "hits": []}
         if verdict["verdict"] == "bad" and check_scam:
-            log.warning("suspicious URL %s: %s", host, verdict["reasons"])
+            mode = policy.mode()
+            if mode == "safe":
+                db.event("page", f"goto {host} refused: scam verdict bad", self.identity_id, level="error")
+                raise Denied(
+                    f"refusing navigation to {host}: scam_check verdict bad "
+                    f"({'; '.join(verdict['reasons']) or 'no details'}) — safe mode never "
+                    "navigates to bad domains")
+            if mode == "balanced":
+                # Explicit human confirmation before navigating anywhere the
+                # heuristics call bad. Approving creates a one-time gate; the
+                # domain is NOT added to the permanent allowlist (see gates).
+                gates.require("goto",
+                              f"Navigate to {host} "
+                              f"(scam_check=bad: {'; '.join(verdict['reasons']) or 'no details'})",
+                              {"_kind": "goto", "identity_id": self.identity_id, "url": url,
+                               "host": host, "verdict": "bad", "reasons": verdict["reasons"]})
+            else:  # turbo: keep the old behaviour (warn and continue)
+                log.warning("suspicious URL %s: %s (turbo: navigating anyway)", host, verdict["reasons"])
         from . import cf
 
         cf_cookies = 0
@@ -227,7 +273,31 @@ class Browser:
             pass
         await self.page.goto(url, wait_until=wait_until, timeout=int(config.env("BROWSER_NAV_TIMEOUT_MS", "60000")))
         await self.human_wait(0.6, 2.0)
-        out = {"url": self.page.url, "scam": verdict, "cf_cookies": cf_cookies}
+        # Drainer-word scan of the loaded page. check_page_text used to be dead
+        # code (zero callers); a page asking for a seed phrase is treated as a
+        # drainer even when its URL looked clean.
+        if check_scam:
+            try:
+                text_verdict = scam_check.check_page_text(await self.text())
+            except Exception:  # noqa: BLE001
+                log.warning("page-text scam check failed for %s (skipping)", host)
+            if text_verdict["verdict"] == "bad":
+                hits = "; ".join(text_verdict["hits"])
+                if policy.mode() == "safe":
+                    db.event("page", f"goto {host} aborted: drainer text ({hits})",
+                             self.identity_id, level="error")
+                    raise Denied(
+                        f"aborting run: page at {host} looks like a drainer ({hits}). "
+                        "Safe mode never continues on a page asking for a seed phrase or "
+                        "unlimited approval — close the tab and review the URL before retrying.")
+                log.warning("drainer words on %s: %s", host, hits)
+                gates.require("goto_text",
+                              f"Page at {host} looks like a drainer ({hits}) — continue anyway?",
+                              {"_kind": "goto_text", "identity_id": self.identity_id, "url": url,
+                               "host": host, "hits": text_verdict["hits"]})
+            elif text_verdict["verdict"] == "warn":
+                log.warning("suspicious page text on %s: %s", host, text_verdict["hits"])
+        out = {"url": self.page.url, "scam": verdict, "text_scam": text_verdict, "cf_cookies": cf_cookies}
         if config.env_bool("CF_ENABLED", True):
             state = await cf.ensure(self, url)
             out["cf"] = state.get("state")

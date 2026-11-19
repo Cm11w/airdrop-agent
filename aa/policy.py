@@ -8,6 +8,12 @@ Modes
 
 A mode never overrides a hard block and never touches a wallet that is not in the
 vault (the operator's main seed stays offline).
+
+Approving a gate never persists its domain to the permanent allowlist in safe
+mode (a safe approval is one-time only); in balanced it persists only when the
+gate payload opts in with persist_domain: true (or `aa gate approve
+--persist-domain`). Turbo keeps auto-allowlist as a feature, logged when it
+happens.
 """
 from __future__ import annotations
 
@@ -95,6 +101,38 @@ def allowlisted_contract(name: str, address: str) -> bool:
 
 def blocked(address: str) -> bool:
     return address.lower() in {a.lower() for a in (cfg().get("blocklist") or [])}
+
+
+def domain_blocklisted(host: str) -> bool:
+    """True when `host` (or a parent domain) is on the operator's `domain_blocklist`
+    in policy.yaml. The blocklist is a hard block: it is enforced by the browser
+    in every mode, even when the caller passes check_scam=False."""
+    h = (host or "").lower().removeprefix("www.")
+    if not h:
+        return False
+    entries = [str(e).lower().removeprefix("www.") for e in (cfg().get("domain_blocklist") or []) if e]
+    return any(h == e or h.endswith("." + e) for e in entries)
+
+
+def browser_cfg() -> dict:
+    """Browser hardening knobs from the `browser:` block in policy.yaml."""
+    return cfg().get("browser") or {}
+
+
+def persist_domain_allowed(payload: dict | None) -> bool:
+    """May approving a gate persist its domain to the permanent allowlist?
+
+    safe      never — an approval is one-time only, the domain is not remembered.
+    balanced  only when the gate payload explicitly opts in (persist_domain: true),
+              or the operator passes --persist-domain to `aa gate approve`.
+    turbo     yes — auto-allowlist is a turbo feature (callers must log it).
+    """
+    m = mode()
+    if m == "safe":
+        return False
+    if m == "turbo":
+        return True
+    return bool((payload or {}).get("persist_domain"))
 
 
 def domain_ok(domain: str) -> bool:

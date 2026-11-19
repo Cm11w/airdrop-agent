@@ -53,6 +53,10 @@ def ingest(items: list[dict], *, auto: bool = False) -> dict:
         if not ok or verdict["verdict"] == "bad":
             rejected += 1
             continue
+        if policy.mode() == "safe":
+            # R12: safe mode never auto-queues radar finds for execution — the item
+            # is stored for a human to review, no quest is created.
+            continue
         qid = create_quest(it, url, s)
         db.execute("UPDATE radar_items SET status='queued' WHERE url=?", (url,))
         queued.append(qid)
