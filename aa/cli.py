@@ -251,15 +251,9 @@ def wallet_sol_send(args) -> tuple[dict, list[str]]:
     w = solw.resolve(r["id"], args.label)
     cfg = chains.sol(args.chain)
     lamports = int(args.amount * 1e9)
-    from . import guard as gd
-
-    gd.check_kill()
-    payload = {"_kind": "tx", "chain": args.chain, "identity": r["id"], "label": w["label"],
-               "to": args.to, "value": str(lamports), "data": "solana"}
-    if not gates.consume(payload):
-        want, reasons = policy.needs_gate("tx", mainnet=not cfg.get("testnet"), contract_ok=True)
-        if want:
-            gates.require("tx", f"SOL send {args.amount} → {args.to} dari {w['label']}", payload)
+    # Gate lives inside solw.send() (R9) — same payload as the old CLI wrapper,
+    # so a single approval still covers the call; gating here too would
+    # consume the approval and then raise a second gate inside send().
     out = solw.send(cfg, w["label"], args.to, lamports, broadcast=args.broadcast, identity_id=r["id"])
     return out, []
 
@@ -278,8 +272,13 @@ def wallet_approve(args) -> tuple[dict, list[str]]:
     r = db.identity(args.identity)
     w = evmw.resolve(r["id"], args.label)
     out = sender.approve(args.chain, r["id"], w["label"], args.token, args.spender,
-                         None if args.unlimited else int(args.amount * 1e18), broadcast=args.broadcast)
-    return out, []
+                         None if args.unlimited else int(args.amount * 1e18),
+                         broadcast=args.broadcast, unlimited=args.unlimited)
+    hints = ["add --broadcast to execute" if not args.broadcast else "aa status"]
+    if args.unlimited:
+        hints = ["WARNING: unlimited approval (2**256-1) — a human gate code is "
+                 "required before it executes (exit 10)"] + hints
+    return out, hints
 
 
 # ---------------- sign ----------------
@@ -750,7 +749,13 @@ def build() -> argparse.ArgumentParser:
     gg = g.add_parser("approve")
     gg.add_argument("id", type=int)
     gg.add_argument("code")
-    gg.set_defaults(fn=envelope_run, target=lambda id, code: (gates.approve(id, code), []))
+    # Balanced-mode opt-in only: in safe mode this flag is ignored (an approval
+    # never persists its domain there); in turbo the domain persists anyway.
+    gg.add_argument("--persist-domain", action="store_true",
+                    help="also add the gate's domain to the permanent allowlist (balanced only)")
+    gg.set_defaults(fn=envelope_run,
+                    target=lambda id, code, persist_domain=False: (
+                        gates.approve(id, code, persist_domain=persist_domain), []))
     gr = g.add_parser("reject")
     gr.add_argument("id", type=int)
     gr.set_defaults(fn=envelope_run, target=lambda id: (gates.reject(id), []))

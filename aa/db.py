@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import random
 import sqlite3
 import string
@@ -38,7 +39,9 @@ CREATE TABLE IF NOT EXISTS runs(
   proof TEXT, error TEXT, started_at TEXT, ended_at TEXT);
 CREATE TABLE IF NOT EXISTS gates(
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, summary TEXT, payload TEXT, payload_hash TEXT,
-  code_hash TEXT, code TEXT, status TEXT DEFAULT 'pending', created_at TEXT, decided_at TEXT);
+  code_hash TEXT, code_salt TEXT, code TEXT, status TEXT DEFAULT 'pending', created_at TEXT, decided_at TEXT);
+-- NOTE (R4): `code` is a legacy column, kept only for schema compat — it is
+-- always NULL. Gate codes are verified against salted `code_hash` only.
 CREATE TABLE IF NOT EXISTS spend(day TEXT, chain TEXT, wallet TEXT, wei TEXT, PRIMARY KEY(day, chain, wallet));
 CREATE TABLE IF NOT EXISTS checkins(project TEXT, day TEXT, status TEXT, proof TEXT, PRIMARY KEY(project, day));
 CREATE TABLE IF NOT EXISTS events(
@@ -67,7 +70,28 @@ def db() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH, timeout=30)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
+    _migrate_gates(con)
+    try:
+        if DB_PATH.stat().st_mode & 0o777 != 0o600:
+            os.chmod(DB_PATH, 0o600)
+    except OSError:
+        pass
     return con
+
+
+def _migrate_gates(con: sqlite3.Connection) -> None:
+    """R4 migration: gate codes are hash-only.
+
+    - Adds the `code_salt` column (salted SHA-256 per gate).
+    - NULLs any legacy plaintext in `code` (column kept for schema compat,
+      never written again). Legacy rows keep working via their unsalted
+      `code_hash` fallback in gates._check_code.
+    """
+    cols = [c[1] for c in con.execute("PRAGMA table_info(gates)")]
+    if "code_salt" not in cols:
+        con.execute("ALTER TABLE gates ADD COLUMN code_salt TEXT")
+    con.execute("UPDATE gates SET code=NULL WHERE code IS NOT NULL")
+    con.commit()
 
 
 def rows(sql: str, args: tuple = ()) -> list[dict]:

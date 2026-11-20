@@ -2,6 +2,10 @@
 enabled: true
 tick_seconds: 120
 max_quests_per_run: 3
+# R12: in safe mode the follow/quests modules stay OFF unless explicitly opted in
+# here (safe_allow_follow / safe_allow_quests: true). Other modes ignore these.
+safe_allow_follow: false
+safe_allow_quests: false
 active_hours: [7, 24]              # local time window; quiet outside it
 intervals:                         # minutes between module runs
   radar_min: 25

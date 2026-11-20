@@ -19,7 +19,7 @@ import time
 
 import requests
 
-from . import config, db
+from . import config, db, policy
 from .log import get_logger
 
 log = get_logger("humanize")
@@ -95,6 +95,9 @@ PROVIDERS = [
 
 
 def llm_available() -> bool:
+    # R13: safe mode never sends chat context to an external LLM provider.
+    if policy.mode() == "safe":
+        return False
     if (config.env("LLM_MOCK") or "0") == "1":
         return False
     return any(c.get("key") for c in _llm_configs())
@@ -121,6 +124,10 @@ def _llm_configs() -> list[dict]:
 
 
 def llm(prompt: str, system: str = "", max_tokens: int = 220, temperature: float = 0.9) -> str | None:
+    # R13: safe mode never sends chat context to an external LLM provider —
+    # callers fall back to the offline template engine.
+    if policy.mode() == "safe":
+        return None
     if config.env_bool("LLM_MOCK"):
         return None
     for c in _llm_configs():

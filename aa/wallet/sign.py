@@ -66,12 +66,33 @@ def _check_origin(host: str, strict: bool = True) -> None:
         raise Denied(f"origin '{host}' is not in the domain allowlist (aa allow add {host})")
 
 
+def _norm_host(host: str) -> str:
+    return (host or "").lower().removeprefix("www.")
+
+
+def _check_siwe_domain(summary: dict, host: str) -> None:
+    """R5: enforce the SIWE domain check the module docstring promises.
+
+    When the message carries a domain field (SIWE `domain:` / `URI:` / `origin:`),
+    it must match the page origin — in EVERY mode. A mismatch is a Denied, never
+    a gate: no human approval can make a foreign domain's login message safe to
+    sign from this page. When the message has no domain field, the existing
+    allowlist check on the origin (done by the caller) still applies.
+    """
+    domain = _norm_host(summary.get("domain_field") or "")
+    if domain and host and domain != _norm_host(host):
+        raise Denied(
+            f"SIWE domain mismatch: message domain '{domain}' != page origin '{host}'"
+        )
+
+
 def personal(identity_id: str, label: str, message: str, origin: str = "",
              broadcast_gate: bool = True) -> dict:
     host = origin_host(origin) if origin else ""
     if host:
         _check_origin(host)
     summary = summarize_message(message)
+    _check_siwe_domain(summary, host)
     payload = {"_kind": "sign_text", "identity_id": identity_id, "label": label,
                "message": message, "origin": host}
     gate, reasons = policy.needs_gate("sign_text", identity_id=identity_id)

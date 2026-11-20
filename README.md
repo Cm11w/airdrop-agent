@@ -36,6 +36,7 @@ aa autopilot tick                              # radar → warm → daily → qu
 - [Social and email](#social-and-email)
 - [Autopilot](#autopilot)
 - [Approvals and the kill switch](#approvals-and-the-kill-switch)
+- [Safe mode (this fork)](#safe-mode-this-fork)
 - [Other surfaces](#other-surfaces)
 - [Docs](#docs)
 - [Limits](#limits)
@@ -295,6 +296,22 @@ aa gate approve 3 K7F2Q9
 
 Re-run the exact command. Any changed field changes the hash. `aa kill "reason"` stops everything
 with exit 99 until `aa unkill`.
+
+## Safe mode (this fork)
+
+This fork strengthens `safe` mode so the protections the docs claim are
+actually enforced — see [docs/SAFE-MODE.md](docs/SAFE-MODE.md) for the full
+table. In short: unlimited approvals always gate (every mode); gate codes are
+stored hash-only; Solana signing and transactions show real amounts and
+recipients; bad-domain navigation is refused in safe mode; Discord, external
+grind LLMs, quest `eval`/`api` steps and radar auto-queue are off in safe
+mode; risky features outside safe mode need an explicit opt-in. No feature
+was removed — safe mode only changes when it may run and what approval it
+needs.
+
+```bash
+aa mode safe
+```
 
 ## Other surfaces
 

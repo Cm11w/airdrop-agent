@@ -3,7 +3,9 @@
 Static checks run offline and always. RDAP (domain age) is optional and cached.
 
 verdict: ok | warn | bad
-  bad   -> never auto-connect/sign, always gate
+  bad   -> never auto-connect/sign, always gate; in safe mode the browser
+           refuses to navigate there at all, in balanced it needs an explicit
+           gate approval first (see aa/browser/engine.py:goto)
   warn  -> connect only with a gate
   ok    -> auto-connect allowed (still subject to the domain allowlist)
 """
@@ -27,6 +29,13 @@ BRANDS = ["uniswap", "galxe", "zealy", "layer3", "questn", "intract", "guild", "
 SUSPICIOUS_TLD = {"xyz", "top", "click", "site", "online", "live", "app", "fun", "icu", "buzz", "gq", "tk"}
 DRAIN_WORDS = ["seed phrase", "recovery phrase", "validate wallet", "sync wallet", "claim reward",
                "airdrop claim", "connect to claim", "migrate wallet", "upgrade wallet"]
+# BAD_DOMAINS is intentionally left EMPTY. Do not hardcode a list of bad domains
+# here: a hardcoded list goes stale the moment it is written and gives a false
+# sense of coverage. The operator-maintained blocklist lives in policy.yaml
+# (`domain_blocklist:`) and is enforced by check_url() below and by the browser
+# (aa/browser/engine.py:goto) as a hard block in every mode. This empty set is
+# kept only as a code-level escape hatch for a domain that must be blocked even
+# when no policy.yaml is loaded.
 BAD_DOMAINS = set()
 
 
@@ -75,6 +84,12 @@ def check_url(url: str, deep: bool = False) -> dict:
         verdict = "warn" if verdict == "ok" else verdict
     if host in BAD_DOMAINS:
         reasons.append("known bad domain")
+        verdict = "bad"
+    # Operator-maintained blocklist from policy.yaml (`domain_blocklist:`).
+    # Subdomains of a listed domain are blocked too.
+    _blocked = [str(e).lower() for e in (config.policy().get("domain_blocklist") or []) if e]
+    if any(host == e or host.endswith("." + e) for e in _blocked):
+        reasons.append("domain blocklisted in policy.yaml (domain_blocklist)")
         verdict = "bad"
 
     reg = _registrable(host)

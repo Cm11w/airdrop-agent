@@ -16,7 +16,7 @@ from solders.pubkey import Pubkey
 from solders.system_program import TransferParams, transfer
 from solders.transaction import Transaction
 
-from .. import db, vault
+from .. import db, gates, guard, vault
 from ..jsonio import Denied
 from ..log import get_logger
 from . import hd
@@ -108,6 +108,7 @@ def send(cfg: dict, key: str, to_addr: str, lamports: int, *, memo: str | None =
          broadcast: bool = False, identity_id: str = "") -> dict:
     from .. import policy as pol
 
+    guard.check_kill()
     if pol.blocked(to_addr):
         raise Denied(f"address blocklisted: {to_addr}")
     kp = vault.load_sol(key)
@@ -121,6 +122,18 @@ def send(cfg: dict, key: str, to_addr: str, lamports: int, *, memo: str | None =
     units = int((sim or {}).get("value", {}).get("unitsConsumed") or 0)
     pol.check_value(_chain_name(cfg), _wallet_of(identity_id, from_addr) if identity_id else key,
                     lamports, 5000, 1)
+    # R9: gate inside the library function (defense-in-depth, same shape as
+    # EVM send()). Direct callers can no longer bypass the gate by skipping
+    # the CLI wrapper.
+    payload = {"_kind": "tx", "chain": _chain_name(cfg), "identity": identity_id, "label": key,
+               "to": to_addr, "value": str(lamports), "data": "solana"}
+    want_gate, reasons = pol.needs_gate("tx", mainnet=not cfg.get("testnet"), contract_ok=True)
+    if want_gate:
+        if not gates.consume(payload):
+            gates.require("tx", f"SOL send {lamports / LAMPORTS} → {to_addr} dari {key}"
+                                f"\nalasan: {'; '.join(reasons)}", payload)
+    elif not gates.consume(payload):
+        db.event("tx", f"auto: SOL send {lamports / LAMPORTS} → {to_addr}", identity_id)
     if not broadcast:
         return {"simulated": True, "from": from_addr, "to": to_addr, "lamports": lamports,
                 "units": units, "blockhash": blockhash}

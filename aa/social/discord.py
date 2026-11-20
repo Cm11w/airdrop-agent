@@ -16,7 +16,7 @@ import time
 
 import requests
 
-from .. import config, db, humanize, ratelimit, vault
+from .. import config, db, humanize, policy, ratelimit, vault
 from ..browser.engine import Browser
 from ..jsonio import Denied
 from ..log import get_logger
@@ -28,7 +28,18 @@ LEVEL_RX = re.compile(r"(?i)(?:level|level up|naik level|lvl)\D{0,12}(\d+)")
 
 
 # ---------------- login ----------------
+def _check_enabled() -> None:
+    """R13 gate: the Discord self-bot is DISABLED in safe mode (user-token
+    automation is ToS-grey), and outside safe mode it needs an explicit opt-in
+    (social.discord_selfbot: true in policy.yaml, default false)."""
+    if policy.mode() == "safe":
+        raise Denied("Discord self-bot is disabled in safe mode (user-token automation)")
+    if (policy.cfg().get("social") or {}).get("discord_selfbot") is not True:
+        raise Denied("Discord self-bot needs explicit opt-in: set social.discord_selfbot: true in policy.yaml")
+
+
 def token(identity_id: str) -> str:
+    _check_enabled()
     t = vault.get_secret(f"dc:{identity_id}")
     if not t:
         raise Denied(f"identity {identity_id} has no Discord token (aa dc login --identity ...)")
@@ -64,6 +75,7 @@ async () => {
 
 
 async def login(identity_id: str, email: str, password: str, totp_secret: str = "") -> dict:
+    _check_enabled()
     async with Browser(identity_id, profile="discord") as b:
         await b.page.goto("https://discord.com/login", wait_until="domcontentloaded")
         await b.human_wait(2.5, 4.5)
